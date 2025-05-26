@@ -55,7 +55,7 @@ jobs:
             # Pull latest code and build Docker image
             cd ~
             rm -rf react-app
-            git clone https://github.com/lohave39/cicd.git
+            git clone https://github.com/lohave39/cicd.git .
             cd react-app
 
             sudo docker build -t react-app:latest .

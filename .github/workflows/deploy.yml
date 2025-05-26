@@ -1,119 +1,121 @@
 name: CI/CD for React App
 
-
 # 1) Trigger this workflow on every push to "main"
 on:
-    push:
-        branches: [main]
-
+  push:
+    branches: [main]
 
 jobs:
-    deploy:
-        runs-on: ubuntu-latest
+  deploy:
+    runs-on: ubuntu-latest
 
+    steps:
+      # 2) Step: Check out your repository code so we can deploy it
+      - name: Checkout
+        uses: actions/checkout@v3
 
-        steps:
-            # 3) Step: Check out your repository code so we can deploy it
-            - name: Checkout
-              uses: actions/checkout@v3
+      # 3) Step: SSH into your EC2 instance and run provisioning + deploy scripts
+      - name: Provision & Deploy on EC2
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          # 3a) Which server to connect to (stored as a secret)
+          host: ${{ secrets.EC2_HOST }}
 
+          # 3b) Which user on that server (Ubuntu AMIs use "ubuntu")
+          username: ubuntu
 
-            # 4) Step: SSH into your EC2 instance and run provisioning + deploy scripts
-            - name: Provision & Deploy on EC2
-              uses: appleboy/ssh-action@v0.1.6
-              with:
-                  # 4a) Which server to connect to (stored as a secret)
-                  host: ${{ secrets.EC2_HOST }}
+          # 3c) SSH private key (stored as a secret, exported from PuTTYgen or OpenSSH)
+          key: ${{ secrets.EC2_SSH_KEY }}
 
+          # 3d) SSH port (standard is 22)
+          port: 22
 
-                  # 4b) Which user on that server (Ubuntu AMIs use "ubuntu")
-                  username: ubuntu
+          # 4) The actual shell script to run over SSH
+          script: |
+            set -e
 
+            echo "✅ Updating system..."
+            sudo apt update -y
 
-                  # 4c) SSH private key (stored as a secret, exported from PuTTYgen or OpenSSH)
-                  key: ${{ secrets.EC2_SSH_KEY }}
+            # A) Install Docker if it's not already installed
+            if ! command -v docker &> /dev/null
+            then
+                echo "🐳 Installing Docker..."
+                sudo apt install -y docker.io
+                sudo systemctl start docker
+                sudo systemctl enable docker
+                sudo usermod -aG docker ubuntu
+                echo "✅ Docker installed."
+            fi
 
+            # B) Install Nginx if not installed
+            if ! command -v nginx &> /dev/null
+            then
+                echo "🌐 Installing Nginx..."
+                sudo apt install -y nginx
+                sudo systemctl enable nginx
+                sudo systemctl start nginx
+            fi
 
-                  # 4d) SSH port (standard is 22)
-                  port: 22
+            echo "⚙️ Configuring Nginx reverse proxy..."
 
+            # Remove default Nginx welcome site
+            sudo rm -f /etc/nginx/sites-enabled/default
 
-                  # 5) The actual shell script to run over SSH
-                  script: |
-                      set -e
+            # Write custom Nginx config
+            sudo tee /etc/nginx/sites-available/react-app.conf > /dev/null << 'EOF'
+            upstream react_app {
+                server 127.0.0.1:3000;
+            }
 
+            server {
+                listen 80 default_server;
+                listen [::]:80 default_server;
+                server_name _;
 
-                      # Remove the default Nginx welcome site so it won’t intercept port 80
-                      sudo rm -f /etc/nginx/sites-enabled/default
+                location / {
+                    proxy_pass         http://react_app;
+                    proxy_http_version 1.1;
+                    proxy_set_header   Upgrade $http_upgrade;
+                    proxy_set_header   Connection  "upgrade";
+                    proxy_set_header   Host        $host;
+                    proxy_cache_bypass $http_upgrade;
+                }
+            }
+            EOF
 
+            # Enable new Nginx site
+            sudo ln -sfn /etc/nginx/sites-available/react-app.conf /etc/nginx/sites-enabled/react-app.conf
 
-                      # ---------------------------------------------------
-                      # B) Write your custom Nginx proxy config for React
-                      # ---------------------------------------------------
-                      sudo tee /etc/nginx/sites-available/react-app.conf > /dev/null << 'EOF'
-                      upstream react_app {
-                          server 127.0.0.1:3000;
-                      }
+            # Test & reload Nginx
+            sudo nginx -t
+            sudo systemctl reload nginx
 
+            # C) Clone latest app code
+            echo "📥 Pulling latest code..."
+            rm -rf react-app
+            mkdir react-app
+            cd ~/react-app
+            git clone https://github.com/lohave39/cicd.git .
+            git fetch origin main
+            git reset --hard origin/main
 
-                      server {
-                          # Listen on port 80 as the default server
-                          listen 80 default_server;
-                          listen [::]:80 default_server;
-                          server_name _;
+            # D) Build Docker image
+            echo "🐳 Building Docker image..."
+            sudo docker build -t react-app:latest .
 
+            # E) Stop & remove existing container (if any)
+            sudo docker stop react-app || true
+            sudo docker rm react-app || true
 
-                          # Proxy all requests to the React container on localhost:3000
-                          location / {
-                              proxy_pass         http://react_app;
-                              proxy_http_version 1.1;
-                              proxy_set_header   Upgrade $http_upgrade;
-                              proxy_set_header   Connection  "upgrade";
-                              proxy_set_header   Host        $host;
-                              proxy_cache_bypass $http_upgrade;
-                          }
-                      }
-                      EOF
+            # F) Run the container
+            echo "🚀 Running Docker container..."
+            sudo docker run -d \
+              --name react-app \
+              -p 3000:80 \
+              react-app:latest
 
+            # G) Clean up unused Docker images
+            sudo docker image prune -f
 
-                      # Enable the new site by symlinking into sites-enabled
-                      sudo ln -sfn /etc/nginx/sites-available/react-app.conf /etc/nginx/sites-enabled/react-app.conf
-
-
-                      # Test Nginx config syntax and restart to apply changes
-                      sudo nginx -t
-                      sudo systemctl enable nginx
-                      sudo systemctl restart nginx
-
-
-                      # ---------------------------------------------------
-                      # C) Pull latest code, build Docker image, and run it
-                      # ---------------------------------------------------
-                      rm -rf react-app
-                      mkdir react-app
-                      cd ~/react-app
-                      git clone https://github.com/lohave39/cicd.git .
-                      git fetch origin main
-                      git reset --hard origin/main
-
-
-                      # Build the multi-stage Docker image defined in your Dockerfile
-                      sudo docker build -t react-app:latest .
-
-
-                      # Stop & remove any old container named "react-app"
-                      sudo docker stop react-app
-                      sudo docker rm   react-app
-
-
-                      # Run the new container:
-                      # - Name it "react-app"
-                      # - Map host port 3000 → container port 80
-                      sudo docker run -d \
-                        --name react-app \
-                        -p 3000:80 \
-                        react-app:latest
-
-
-                      # Clean up any dangling (unused) Docker images
-                      sudo docker image prune -f
+            echo "✅ Deployment complete."

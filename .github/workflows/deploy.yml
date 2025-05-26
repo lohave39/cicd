@@ -1,0 +1,74 @@
+name: CI/CD for React App
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Provision & Deploy on EC2
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+
+            # Remove default Nginx welcome site
+            sudo rm -f /etc/nginx/sites-enabled/default
+
+            # Nginx proxy config
+            sudo tee /etc/nginx/sites-available/react-app.conf > /dev/null << 'EOF'
+            upstream react_app {
+                server 127.0.0.1:3000;
+            }
+
+            server {
+                listen 80 default_server;
+                listen [::]:80 default_server;
+                server_name _;
+
+                location / {
+                    proxy_pass         http://react_app;
+                    proxy_http_version 1.1;
+                    proxy_set_header   Upgrade $http_upgrade;
+                    proxy_set_header   Connection  "upgrade";
+                    proxy_set_header   Host        $host;
+                    proxy_cache_bypass $http_upgrade;
+                }
+            }
+            EOF
+
+            sudo ln -sfn /etc/nginx/sites-available/react-app.conf /etc/nginx/sites-enabled/react-app.conf
+            sudo nginx -t
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
+
+            # Pull latest code and build Docker image
+            cd ~
+            rm -rf react-app
+            git clone https://github.com/lohave39/cicd.git
+            cd react-app
+
+            sudo docker build -t react-app:latest .
+
+            # Stop old container if running
+            sudo docker stop react-app || true
+            sudo docker rm react-app || true
+
+            # Run new container
+            sudo docker run -d \
+              --name react-app \
+              -p 3000:80 \
+              react-app:latest
+
+            # Clean up unused Docker images
+            sudo docker image prune -f
